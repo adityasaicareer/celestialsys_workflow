@@ -1,0 +1,2 @@
+import Link from 'next/link';
+export default function Header(): JSX.Element { return <header className="header"><div className="container nav"><Link href="/" className="brand" aria-label="Northstar home">northstar<span>.</span></Link><nav aria-label="Main navigation"><Link href="/">Journal</Link><Link href="/admin">Studio</Link></nav><Link href="/admin" className="nav-cta">Write with us <span aria-hidden="true">↗</span></Link></div></header>; }

@@ -1,0 +1,4 @@
+import Link from 'next/link';
+import type { Post } from '../lib/types';
+interface PostCardProps { post: Post; featured?: boolean; }
+export default function PostCard({ post, featured = false }: PostCardProps): JSX.Element { return <article className={featured ? 'post-card featured-card' : 'post-card'}><div className="card-visual" style={post.imageUrl ? { backgroundImage: `url(${post.imageUrl})` } : undefined}><span>{post.category || 'Journal'}</span></div><div className="card-body"><div className="post-meta">{new Date(post.publishedAt || post.createdAt).toLocaleDateString()} · {post.readTime || 5} min read</div><h3><Link href={`/posts/${post.id}`}>{post.title}</Link></h3><p>{post.excerpt}</p><Link className="arrow-link" href={`/posts/${post.id}`} aria-label={`Read ${post.title}`}>Read story <span aria-hidden="true">↗</span></Link></div></article>; }

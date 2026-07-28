@@ -1,0 +1,3 @@
+import { useRouter } from 'next/router'; import { useEffect } from 'react'; import Loading from './Loading'; import { useAuth } from './AuthProvider';
+interface Props { children: React.ReactNode; roles?: string[]; }
+export default function ProtectedRoute({ children, roles }: Props): JSX.Element { const { user, loading } = useAuth(); const router = useRouter(); useEffect(() => { if (!loading && (!user || (roles && !roles.includes(user.role)))) router.replace(user ? '/dashboard' : '/'); }, [loading, user, router, roles]); if (loading || !user || (roles && !roles.includes(user.role))) return <Loading fullScreen />; return <>{children}</>; }

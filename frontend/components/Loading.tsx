@@ -1,0 +1,2 @@
+interface LoadingProps { label?: string; fullScreen?: boolean; }
+export default function Loading({ label = 'Loading', fullScreen = false }: LoadingProps): JSX.Element { return <div className={`flex items-center justify-center ${fullScreen ? 'min-h-screen' : 'p-8'}`} role="status" aria-label={label}><span className="h-8 w-8 animate-spin rounded-full border-4 border-slate-200 border-t-blue-600" /><span className="sr-only">{label}</span></div>; }

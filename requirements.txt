@@ -1,0 +1,40 @@
+# LangGraph and LangChain Core
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+
+# Pydantic for data validation
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Database and ORM
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+pymongo>=4.6.0
+
+# FastAPI for backend
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+
+# Testing
+pytest>=8.0.0
+pytest-cov>=4.1.0
+pytest-asyncio>=0.23.0
+hypothesis>=6.98.0  # For property-based testing
+
+# Docker SDK
+docker>=7.0.0
+
+# Code quality tools
+pylint>=3.0.0
+mypy>=1.8.0
+black>=24.0.0
+ruff>=0.2.0
+
+# Frontend tools (will be managed by npm/yarn in frontend directory)
+# Node.js, npm, eslint, prettier will be in frontend/package.json
+
+# Utilities
+python-dotenv>=1.0.0
+colorlog>=6.8.0
