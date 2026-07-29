@@ -367,7 +367,7 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
                 f"      - POSTGRES_DB={postgres_db}",
                 f"      - POSTGRES_USER={postgres_user}",
                 f"      - POSTGRES_PASSWORD={postgres_password}",
-                f"      - DATABASE_URL=postgresql://{postgres_user}:{postgres_password}@postgres:5432/{postgres_db}",
+                f"      - DATABASE_URL=postgresql+asyncpg://{postgres_user}:{postgres_password}@postgres:5432/{postgres_db}",
             ])
         
         if has_mongo:

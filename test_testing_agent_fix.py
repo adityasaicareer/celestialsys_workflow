@@ -1,76 +1,130 @@
 #!/usr/bin/env python3
 """
-Test script to verify Testing Agent import structure scanning works correctly.
+Quick test to verify Testing Agent backend reading fix is working.
+This script checks if the new _read_backend_code_content method exists.
 """
 
-from pathlib import Path
 from workflow.agents.testing_agent import TestingAgent
+from pathlib import Path
+import inspect
 
-def test_backend_structure_scanning():
-    """Test that backend structure scanning extracts correct import paths."""
+
+def test_backend_reading_method():
+    """Test that _read_backend_code_content method exists."""
+    agent = TestingAgent()
     
-    # Initialize testing agent
-    testing_agent = TestingAgent()
+    print("Testing Testing Agent Backend Reading Fix...")
+    print("=" * 60)
     
-    # Scan backend structure
-    backend_path = Path("backend")
-    if not backend_path.exists():
-        print("❌ Backend directory not found")
-        return False
-    
-    print("📂 Scanning backend structure...")
-    structure = testing_agent._scan_backend_structure(backend_path)
-    
-    print("\n✅ Backend Structure Scan Results:")
-    print(f"   Main file: {structure['main_file']}")
-    print(f"   Modules found: {list(structure['modules'].keys())}")
-    
-    print("\n📋 Import Examples Extracted:")
-    for name, import_path in structure['import_examples'].items():
-        print(f"   {name:30} -> {import_path}")
-    
-    # Verify expected imports are found
-    expected_classes = ['Todo', 'Base']
-    expected_functions = ['create_todo', 'get_todo', 'list_todos', 'delete_todo', 'toggle_or_rename_todo']
-    
-    found_classes = [name for name in structure['import_examples'].keys() if name in expected_classes]
-    found_functions = [name for name in structure['import_examples'].keys() if name in expected_functions]
-    
-    print(f"\n✅ Found {len(found_classes)}/{len(expected_classes)} expected classes")
-    print(f"✅ Found {len(found_functions)}/{len(expected_functions)} expected functions")
-    
-    # Verify import paths are correct format
-    all_imports_correct = all(
-        import_path.startswith("from ") and " import " in import_path
-        for import_path in structure['import_examples'].values()
-    )
-    
-    if all_imports_correct:
-        print("✅ All import paths use correct format (from X import Y)")
+    # Check if method exists
+    if hasattr(agent, '_read_backend_code_content'):
+        print("✅ Method _read_backend_code_content exists")
+        
+        # Check method signature
+        method = getattr(agent, '_read_backend_code_content')
+        sig = inspect.signature(method)
+        
+        if 'backend_path' in sig.parameters:
+            print("✅ Method has backend_path parameter")
+        else:
+            print("❌ Method missing backend_path parameter")
+            return False
+        
+        # Check if method is callable
+        if callable(method):
+            print("✅ Method is callable")
+        else:
+            print("❌ Method is not callable")
+            return False
+        
+        return True
     else:
-        print("❌ Some import paths have incorrect format")
+        print("❌ Method _read_backend_code_content does NOT exist")
         return False
+
+
+def test_generate_backend_tests_signature():
+    """Test that generate_backend_tests uses the new method."""
+    agent = TestingAgent()
     
-    # Check specific important imports
-    if 'Todo' in structure['import_examples']:
-        todo_import = structure['import_examples']['Todo']
-        print(f"\n📌 Todo import path: {todo_import}")
-        if todo_import == "from models.todo import Todo":
-            print("   ✅ Correct! (matches actual backend structure)")
+    print("\nTesting generate_backend_tests Integration...")
+    print("=" * 60)
+    
+    # Get the source code of generate_backend_tests
+    method = agent.generate_backend_tests
+    source = inspect.getsource(method)
+    
+    checks = [
+        "_read_backend_code_content",
+        "backend_code_content",
+        "Reading backend code content"
+    ]
+    
+    all_passed = True
+    for check in checks:
+        if check in source:
+            print(f"✅ Found: '{check}' in generate_backend_tests")
         else:
-            print(f"   ❌ Expected 'from models.todo import Todo', got '{todo_import}'")
+            print(f"❌ Missing: '{check}' in generate_backend_tests")
+            all_passed = False
     
-    if 'create_todo' in structure['import_examples']:
-        service_import = structure['import_examples']['create_todo']
-        print(f"📌 create_todo import path: {service_import}")
-        if service_import == "from services.todo_service import create_todo":
-            print("   ✅ Correct! (matches actual backend structure)")
+    return all_passed
+
+
+def test_method_functionality():
+    """Test that the method can actually read backend code."""
+    agent = TestingAgent()
+    
+    print("\nTesting Method Functionality...")
+    print("=" * 60)
+    
+    # Try reading the actual backend directory
+    backend_path = Path(__file__).parent / "backend"
+    
+    if not backend_path.exists():
+        print("⚠️  Backend directory not found - skipping functionality test")
+        return True
+    
+    try:
+        # Call the method
+        result = agent._read_backend_code_content(backend_path)
+        
+        if result and len(result) > 0:
+            print(f"✅ Method returned {len(result)} characters of code")
+            
+            # Check if it contains file markers
+            if "## FILE:" in result:
+                print("✅ Contains file markers")
+            else:
+                print("⚠️  No file markers found")
+            
+            # Check if it read main.py
+            if "main.py" in result:
+                print("✅ Read main.py")
+            else:
+                print("⚠️  Did not read main.py")
+            
+            return True
         else:
-            print(f"   ❌ Expected 'from services.todo_service import create_todo', got '{service_import}'")
-    
-    print("\n🎉 Backend structure scanning is working correctly!")
-    return True
+            print("❌ Method returned empty result")
+            return False
+    except Exception as e:
+        print(f"❌ Method raised exception: {e}")
+        return False
+
 
 if __name__ == "__main__":
-    success = test_backend_structure_scanning()
-    exit(0 if success else 1)
+    print("\n" + "=" * 60)
+    print("TESTING AGENT BACKEND READING FIX VERIFICATION")
+    print("=" * 60 + "\n")
+    
+    test1 = test_backend_reading_method()
+    test2 = test_generate_backend_tests_signature()
+    test3 = test_method_functionality()
+    
+    print("\n" + "=" * 60)
+    if test1 and test2 and test3:
+        print("✅ ALL TESTS PASSED - Testing Agent fix is working!")
+    else:
+        print("❌ SOME TESTS FAILED - Review the fix implementation")
+    print("=" * 60 + "\n")

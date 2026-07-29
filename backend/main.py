@@ -1,594 +1,600 @@
-from __future__ import annotations
-
-import base64
-import csv
+"""FastAPI application entry point for the visitor management platform."""
+from datetime import datetime, timedelta, timezone
 import hashlib
-import hmac
 import io
-import json
-import os
 import secrets
-from datetime import date, datetime, timedelta, timezone
-from enum import Enum
-from typing import Annotated, Any, AsyncGenerator
-
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from openpyxl import Workbook
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, String, Text, func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./visitor_access.db")
-JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret-in-production")
-TOKEN_MINUTES = int(os.getenv("TOKEN_MINUTES", "60"))
-
-engine = create_async_engine(DATABASE_URL, echo=False)
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
-security = HTTPBearer(auto_error=False)
-
-
-class Role(str, Enum):
-    """Application roles."""
-
-    SUPER_ADMIN = "super_admin"
-    ADMIN = "admin"
-    USER = "user"
-
-
-class VisitStatus(str, Enum):
-    """Visitor approval states."""
-
-    WAITING = "waiting_for_approval"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-
-
-class Base(DeclarativeBase):
-    """Base SQLAlchemy model."""
-
-
-class User(Base):
-    """Application user."""
-
-    __tablename__ = "users"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
-    full_name: Mapped[str] = mapped_column(String(160))
-    password_hash: Mapped[str] = mapped_column(String(256))
-    role: Mapped[str] = mapped_column(String(30), default=Role.USER.value)
-    organization: Mapped[str | None] = mapped_column(String(160), nullable=True)
-    location: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    active: Mapped[bool] = mapped_column(Boolean, default=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    deleted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class Visitor(Base):
-    """Visitor registration and approval record."""
-
-    __tablename__ = "visitors"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    identity: Mapped[str] = mapped_column(String(160))
-    phone: Mapped[str] = mapped_column(String(30))
-    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
-    pass_type: Mapped[str] = mapped_column(String(50))
-    start_date: Mapped[date] = mapped_column(Date)
-    end_date: Mapped[date] = mapped_column(Date)
-    origin: Mapped[str] = mapped_column(String(160))
-    visitee: Mapped[str] = mapped_column(String(160))
-    approver_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    location: Mapped[str] = mapped_column(String(80))
-    consent: Mapped[bool] = mapped_column(Boolean)
-    id_proof: Mapped[str] = mapped_column(String(160))
-    photo_data: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(40), default=VisitStatus.WAITING.value)
-    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    submitted_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    checked_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    checked_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    access_card: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    device_certificate: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    internet_access_requested: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class AuditLog(Base):
-    """Immutable audit attribution record."""
-
-    __tablename__ = "audit_logs"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    action: Mapped[str] = mapped_column(String(80))
-    entity: Mapped[str] = mapped_column(String(80))
-    entity_id: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class NotificationPreference(Base):
-    """Per-administrator notification settings."""
-
-    __tablename__ = "notification_preferences"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True)
-    muted: Mapped[bool] = mapped_column(Boolean, default=False)
-    internet_requests: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
-class UserCreate(BaseModel):
-    """User registration payload."""
-
-    email: EmailStr
-    full_name: str = Field(min_length=2, max_length=160)
-    password: str = Field(min_length=8)
-    organization: str | None = None
-    location: str | None = None
-
-
-class UserUpdate(BaseModel):
-    """Editable user fields."""
-
-    full_name: str | None = None
-    organization: str | None = None
-    location: str | None = None
-    role: Role | None = None
-    active: bool | None = None
-
-
-class LoginRequest(BaseModel):
-    """Login payload."""
-
-    email: EmailStr
-    password: str
-
-
-class UserRead(BaseModel):
-    """Public user representation."""
-
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    email: EmailStr
-    full_name: str
-    role: Role
-    organization: str | None
-    location: str | None
-    active: bool
-
-
-class VisitorCreate(BaseModel):
-    """Visitor entry payload."""
-
-    identity: str = Field(min_length=2, max_length=160)
-    phone: str = Field(min_length=7, max_length=30)
-    email: EmailStr | None = None
-    pass_type: str = Field(min_length=2, max_length=50)
-    start_date: date
-    end_date: date
-    origin: str
-    visitee: str
-    approver_id: int | None = None
-    location: str
-    consent: bool
-    id_proof: str
-    photo_data: str = Field(min_length=20, description="Base64 camera-captured image")
-    access_card: dict[str, Any] | None = None
-    device_certificate: dict[str, Any] | None = None
-    internet_access_requested: bool = False
-
-
-class VisitorUpdate(VisitorCreate):
-    """Payload used only to edit and resubmit rejected entries."""
-
-
-class VisitorRead(BaseModel):
-    """Visitor response model."""
-
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    identity: str
-    phone: str
-    email: EmailStr | None
-    pass_type: str
-    start_date: date
-    end_date: date
-    origin: str
-    visitee: str
-    approver_id: int | None
-    location: str
-    consent: bool
-    id_proof: str
-    status: VisitStatus
-    rejection_reason: str | None
-    submitted_by: int
-    checked_in_at: datetime | None
-    checked_out_at: datetime | None
-    internet_access_requested: bool
-
-
-class ApprovalRequest(BaseModel):
-    """Approval decision payload."""
-
-    approved: bool
-    rejection_reason: str | None = Field(default=None, max_length=1000)
-
-
-class ResetRequest(BaseModel):
-    """Password-reset request payload."""
-
-    email: EmailStr
-
-
-class ResetConfirm(BaseModel):
-    """Password-reset confirmation payload."""
-
-    token: str
-    password: str = Field(min_length=8)
-
-
-class PreferenceUpdate(BaseModel):
-    """Notification preference payload."""
-
-    muted: bool
-    internet_requests: bool = True
-
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """Yield an SQLAlchemy asynchronous session."""
-    async with SessionLocal() as session:
-        yield session
-
-
-def hash_password(password: str) -> str:
-    """Hash a password using PBKDF2 with a random salt."""
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 180_000)
-    return base64.b64encode(salt + digest).decode()
-
-
-def verify_password(password: str, encoded: str) -> bool:
-    """Verify a password against a PBKDF2 hash."""
-    try:
-        raw = base64.b64decode(encoded.encode())
-        return hmac.compare_digest(hashlib.pbkdf2_hmac("sha256", password.encode(), raw[:16], 180_000), raw[16:])
-    except (ValueError, TypeError):
-        return False
-
-
-def create_token(user: User, minutes: int = TOKEN_MINUTES) -> str:
-    """Create a signed, expiring bearer token."""
-    payload = {"sub": user.id, "role": user.role, "exp": int((datetime.now(timezone.utc) + timedelta(minutes=minutes)).timestamp())}
-    body = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
-    signature = hmac.new(JWT_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
-    return f"{body}.{signature}"
-
-
-def decode_token(token: str) -> dict[str, Any]:
-    """Validate and decode a signed bearer token."""
-    try:
-        body, signature = token.split(".", 1)
-        expected = hmac.new(JWT_SECRET.encode(), body.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            raise ValueError("invalid signature")
-        padded = body + "=" * (-len(body) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
-        if int(payload["exp"]) < int(datetime.now(timezone.utc).timestamp()):
-            raise ValueError("expired token")
-        return payload
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=401, detail="Invalid or expired token") from error
-
-
-async def current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> User:
-    """Resolve and validate the authenticated active user."""
-    if credentials is None:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    payload = decode_token(credentials.credentials)
-    user = await db.get(User, int(payload["sub"]))
-    if user is None or not user.active or user.deleted_at is not None:
-        raise HTTPException(status_code=403, detail="Inactive or deleted user")
-    return user
-
-
-def require_roles(*roles: Role) -> Any:
-    """Build a dependency that enforces one of the supplied roles."""
-    async def guard(user: Annotated[User, Depends(current_user)]) -> User:
-        if user.role not in {role.value for role in roles}:
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return user
-    return guard
-
-
-async def audit(db: AsyncSession, actor: User, action: str, entity: str, entity_id: int) -> None:
-    """Record an auditable action."""
-    db.add(AuditLog(actor_id=actor.id, action=action, entity=entity, entity_id=entity_id))
-
-
-def validate_visitor(data: VisitorCreate) -> None:
-    """Validate visitor dates, consent, photo, and supported location."""
-    allowed = {"WTC", "Jayanagar", "Noida"}
-    if data.end_date < data.start_date:
-        raise HTTPException(status_code=422, detail="end_date cannot precede start_date")
-    if data.location not in allowed:
-        raise HTTPException(status_code=422, detail="Location must be WTC, Jayanagar, or Noida")
-    if not data.consent:
-        raise HTTPException(status_code=422, detail="Visitor consent is mandatory")
-    if not data.photo_data.startswith(("data:image/", "iVBOR", "/9j/")):
-        raise HTTPException(status_code=422, detail="A camera-captured photo is mandatory")
-
-
-async def send_notification(message: str) -> None:
-    """Email-provider abstraction; replace this implementation with a real provider."""
-    _ = message
-
-
-app = FastAPI(title="Visitor Access and Authorization API", version="1.0.0")
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from config import settings
+from database import get_db, init_db
+from email_provider import get_email_provider
+from models.entities import (
+    AuditLog,
+    Notification,
+    NotificationType,
+    PasswordResetToken,
+    User,
+    UserRole,
+    UserStatus,
+    VisitorEntry,
+    VisitorStatus,
+)
+from schemas.core import (
+    ApprovalRequest,
+    LoginRequest,
+    NotificationResponse,
+    PasswordResetConfirm,
+    PasswordResetRequest,
+    RegisterRequest,
+    ReportFilters,
+    TokenResponse,
+    UserResponse,
+    UserUpdateRequest,
+    VisitorCreateRequest,
+    VisitorResponse,
+)
+from security import create_token, decode_token, hash_password, verify_password
+
+app = FastAPI(
+    title=settings.app_name,
+    version="1.0.0",
+    description="Unified visitor, access, approval, and reporting API.",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    """Create database tables and provision the initial super administrator."""
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    async with SessionLocal() as db:
-        email = os.getenv("SUPER_ADMIN_EMAIL", "superadmin@example.com").lower()
-        existing = await db.scalar(select(User).where(User.email == email))
-        if existing is None:
-            db.add(User(email=email, full_name="Super Administrator", password_hash=hash_password(os.getenv("SUPER_ADMIN_PASSWORD", "ChangeMe123!")), role=Role.SUPER_ADMIN.value, active=True))
-            await db.commit()
+    """Initialize local database tables."""
+    await init_db()
 
 
-@app.post("/auth/register", response_model=UserRead, status_code=201)
-async def register(data: UserCreate, db: Annotated[AsyncSession, Depends(get_db)]) -> User:
-    """Register an inactive user awaiting super-admin approval."""
-    email = str(data.email).lower()
-    if await db.scalar(select(User).where(User.email == email)):
-        raise HTTPException(status_code=409, detail="Email already registered")
-    user = User(email=email, full_name=data.full_name, password_hash=hash_password(data.password), organization=data.organization, location=data.location, active=False, role=Role.USER.value)
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    return user
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exception: HTTPException) -> Response:
+    """Return the standard FastAPI error response."""
+    del request
+    content = '{"detail":"' + str(exception.detail).replace('"', '\\"') + '"}'
+    return Response(
+        content=content,
+        status_code=exception.status_code,
+        media_type="application/json",
+    )
 
 
-@app.post("/auth/login")
-async def login(data: LoginRequest, db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, str]:
-    """Authenticate an active user and issue a bearer token."""
-    user = await db.scalar(select(User).where(User.email == str(data.email).lower(), User.deleted_at.is_(None)))
-    if user is None or not verify_password(data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not user.active:
-        raise HTTPException(status_code=403, detail="User approval is pending")
-    return {"access_token": create_token(user), "token_type": "bearer"}
+@app.get("/health", tags=["system"])
+async def health() -> dict[str, str]:
+    """Return service health status."""
+    return {"status": "ok", "environment": settings.environment}
 
 
-@app.post("/auth/password-reset/request")
-async def request_reset(data: ResetRequest, db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, str]:
-    """Create a short-lived reset token and pass it to the email abstraction."""
-    user = await db.scalar(select(User).where(User.email == str(data.email).lower(), User.deleted_at.is_(None)))
-    if user is not None:
-        token = create_token(user, 30)
-        await send_notification(f"Password reset token: {token}")
-    return {"message": "If the account exists, reset instructions were sent"}
-
-
-@app.post("/auth/password-reset/confirm")
-async def confirm_reset(data: ResetConfirm, db: Annotated[AsyncSession, Depends(get_db)]) -> dict[str, str]:
-    """Validate a reset token and replace the user's password."""
-    payload = decode_token(data.token)
-    user = await db.get(User, int(payload["sub"]))
-    if user is None or user.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="User not found")
-    user.password_hash = hash_password(data.password)
-    await db.commit()
-    return {"message": "Password updated"}
-
-
-@app.get("/users", response_model=list[UserRead])
-async def list_users(
+async def current_user(
+    token: Annotated[str, Depends(oauth2)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    _: Annotated[User, Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN))],
-) -> list[User]:
-    """List non-deleted users for administrators."""
-    return list((await db.scalars(select(User).where(User.deleted_at.is_(None)).order_by(User.id))).all())
-
-
-@app.patch("/users/{user_id}", response_model=UserRead)
-async def update_user(user_id: int, data: UserUpdate, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN))]) -> User:
-    """Edit a user, with role assignment restricted to super administrators."""
+) -> User:
+    """Resolve the authenticated active user from a bearer token."""
+    try:
+        payload = decode_token(token)
+        user_id = int(payload["sub"])
+    except (ValueError, KeyError, TypeError) as error:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication credentials",
+        ) from error
     user = await db.get(User, user_id)
-    if user is None or user.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="User not found")
-    if data.role is not None and actor.role != Role.SUPER_ADMIN.value:
-        raise HTTPException(status_code=403, detail="Only super administrators may assign roles")
-    for field in ("full_name", "organization", "location", "active"):
-        value = getattr(data, field)
-        if value is not None:
-            setattr(user, field, value)
-    if data.role is not None:
-        user.role = data.role.value
-    await audit(db, actor, "update", "user", user.id)
-    await db.commit()
-    await db.refresh(user)
+    if not user or user.is_soft_deleted or user.status != UserStatus.ACTIVE:
+        raise HTTPException(status_code=403, detail="Account is inactive or unavailable")
     return user
 
 
-@app.delete("/users/{user_id}", status_code=204)
-async def delete_user(user_id: int, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN))]) -> Response:
-    """Soft-delete a user and preserve the deleting actor."""
-    user = await db.get(User, user_id)
-    if user is None or user.deleted_at is not None:
+def require_roles(*roles: UserRole):
+    """Create a dependency restricting access to the supplied roles."""
+    async def dependency(
+        user: Annotated[User, Depends(current_user)],
+    ) -> User:
+        """Check the current user's role."""
+        if user.role not in roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return user
+
+    return dependency
+
+
+async def audit(
+    db: AsyncSession,
+    actor_id: int | None,
+    action: str,
+    entity_type: str,
+    entity_id: int | None,
+    details: dict | None = None,
+) -> None:
+    """Append an audit event to the current transaction."""
+    db.add(
+        AuditLog(
+            actor_id=actor_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=details or {},
+        )
+    )
+
+
+@app.post("/auth/register", response_model=UserResponse, status_code=201, tags=["auth"])
+async def register(
+    payload: RegisterRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """Register a pending user who requires administrator approval."""
+    user = User(
+        email=payload.email.lower(),
+        full_name=payload.full_name,
+        phone=payload.phone,
+        organization_id=payload.organization_id,
+        password_hash=hash_password(payload.password),
+        status=UserStatus.PENDING,
+        role=UserRole.USER,
+    )
+    db.add(user)
+    try:
+        await db.commit()
+        await db.refresh(user)
+        return user
+    except IntegrityError as error:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Email is already registered") from error
+
+
+@app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
+async def login(
+    payload: LoginRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> TokenResponse:
+    """Authenticate an active user and issue a JWT."""
+    user = (
+        await db.execute(
+            select(User).where(
+                User.email == payload.email.lower(),
+                User.is_soft_deleted.is_(False),
+            )
+        )
+    ).scalar_one_or_none()
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if user.status != UserStatus.ACTIVE:
+        raise HTTPException(
+            status_code=403,
+            detail="Account is waiting for administrator approval",
+        )
+    return TokenResponse(
+        access_token=create_token(str(user.id), claims={"role": user.role.value})
+    )
+
+
+@app.get("/auth/me", response_model=UserResponse, tags=["auth"])
+async def me(user: Annotated[User, Depends(current_user)]) -> User:
+    """Return the authenticated user's profile."""
+    return user
+
+
+@app.post("/auth/password-reset/request", status_code=202, tags=["auth"])
+async def request_password_reset(
+    payload: PasswordResetRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, str]:
+    """Create a password reset token without disclosing account existence."""
+    user = (
+        await db.execute(
+            select(User).where(
+                User.email == payload.email.lower(),
+                User.is_soft_deleted.is_(False),
+            )
+        )
+    ).scalar_one_or_none()
+    if user:
+        raw = secrets.token_urlsafe(32)
+        token = PasswordResetToken(
+            user_id=user.id,
+            token_hash=hashlib.sha256(raw.encode()).hexdigest(),
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(minutes=settings.password_reset_minutes),
+        )
+        db.add(token)
+        await db.commit()
+        await get_email_provider().send(
+            user.email,
+            "Password reset",
+            settings.frontend_url + "/reset-password?token=" + raw,
+        )
+    return {"message": "If the account exists, reset instructions have been sent"}
+
+
+@app.post("/auth/password-reset/confirm", status_code=204, tags=["auth"])
+async def confirm_password_reset(
+    payload: PasswordResetConfirm,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Consume a valid reset token and replace the password."""
+    token_hash = hashlib.sha256(payload.token.encode()).hexdigest()
+    item = (
+        await db.execute(
+            select(PasswordResetToken).where(
+                PasswordResetToken.token_hash == token_hash,
+                PasswordResetToken.used_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if not item or item.expires_at < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+    user = await db.get(User, item.user_id)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid reset token")
+    user.password_hash = hash_password(payload.new_password)
+    item.used_at = datetime.now(timezone.utc)
+    await db.commit()
+
+
+@app.get("/users", response_model=list[UserResponse], tags=["users"])
+async def list_users(
+    user: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[User]:
+    """List users visible to administrators."""
+    query = select(User).where(User.is_soft_deleted.is_(False))
+    if user.role == UserRole.ADMIN:
+        query = query.where(User.organization_id == user.organization_id)
+    return list((await db.execute(query.order_by(User.created_at.desc()))).scalars().all())
+
+
+@app.patch("/users/{user_id}", response_model=UserResponse, tags=["users"])
+async def update_user(
+    user_id: int,
+    payload: UserUpdateRequest,
+    actor: Annotated[User, Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """Update, approve, assign, or soft-delete a user."""
+    target = await db.get(User, user_id)
+    if not target or target.is_soft_deleted or (
+        actor.role == UserRole.ADMIN
+        and target.organization_id != actor.organization_id
+    ):
         raise HTTPException(status_code=404, detail="User not found")
-    user.deleted_at = datetime.now(timezone.utc)
-    user.deleted_by = actor.id
-    user.active = False
-    await audit(db, actor, "soft_delete", "user", user.id)
+    if payload.role == UserRole.SUPER_ADMIN and actor.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Super Admin can assign Super Admin",
+        )
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        setattr(target, field, value)
+    await audit(
+        db,
+        actor.id,
+        "USER_UPDATED",
+        "User",
+        target.id,
+        payload.model_dump(exclude_unset=True),
+    )
     await db.commit()
-    return Response(status_code=204)
+    await db.refresh(target)
+    return target
 
 
-@app.post("/visitors", response_model=VisitorRead, status_code=201)
-async def create_visitor(data: VisitorCreate, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(current_user)]) -> Visitor:
+@app.delete("/users/{user_id}", status_code=204, tags=["users"])
+async def delete_user(
+    user_id: int,
+    actor: Annotated[User, Depends(require_roles(UserRole.SUPER_ADMIN, UserRole.ADMIN))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> None:
+    """Soft-delete a user without removing audit history."""
+    target = await db.get(User, user_id)
+    if not target or (
+        actor.role == UserRole.ADMIN
+        and target.organization_id != actor.organization_id
+    ):
+        raise HTTPException(status_code=404, detail="User not found")
+    target.is_soft_deleted = True
+    target.status = UserStatus.DELETED
+    await audit(db, actor.id, "USER_DELETED", "User", user_id)
+    await db.commit()
+
+
+@app.post("/visitors", response_model=VisitorResponse, status_code=201, tags=["visitors"])
+async def create_visitor(
+    payload: VisitorCreateRequest,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> VisitorEntry:
     """Create a visitor entry in Waiting for Approval state."""
-    validate_visitor(data)
-    if actor.role == Role.USER and data.approver_id is None:
-        raise HTTPException(status_code=422, detail="An approver is required")
-    visitor = Visitor(**data.model_dump(), submitted_by=actor.id, status=VisitStatus.WAITING.value)
-    db.add(visitor)
+    if payload.approver_id == user.id:
+        raise HTTPException(status_code=400, detail="Creator cannot approve their own entry")
+    values = payload.model_dump()
+    values["photo_metadata"] = payload.photo_metadata.model_dump()
+    values["end_date"] = values["end_date"] or values["visit_date"]
+    entry = VisitorEntry(
+        **values,
+        creator_id=user.id,
+        status=VisitorStatus.WAITING_FOR_APPROVAL,
+    )
+    db.add(entry)
+    try:
+        await db.flush()
+        if payload.approver_id:
+            db.add(
+                Notification(
+                    recipient_id=payload.approver_id,
+                    type=NotificationType.VISITOR_APPROVAL,
+                    title="Visitor approval required",
+                    message="A visitor entry requires your approval",
+                    visitor_entry_id=entry.id,
+                )
+            )
+        await audit(db, user.id, "VISITOR_CREATED", "VisitorEntry", entry.id)
+        await db.commit()
+        await db.refresh(entry)
+        return entry
+    except IntegrityError as error:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Invalid location or approver") from error
+
+
+@app.get("/visitors", response_model=list[VisitorResponse], tags=["visitors"])
+async def list_visitors(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    filters: Annotated[ReportFilters, Depends()],
+) -> list[VisitorEntry]:
+    """List visitor entries according to role and report filters."""
+    query = select(VisitorEntry)
+    if user.role in (UserRole.USER, UserRole.ADMIN):
+        query = query.where(VisitorEntry.creator_id == user.id)
+    if filters.from_date:
+        query = query.where(VisitorEntry.visit_date >= filters.from_date)
+    if filters.to_date:
+        query = query.where(VisitorEntry.visit_date <= filters.to_date)
+    for column, value in (
+        (VisitorEntry.creator_id, filters.creator_id),
+        (VisitorEntry.approver_id, filters.approver_id),
+        (VisitorEntry.status, filters.status),
+        (VisitorEntry.location_id, filters.location_id),
+    ):
+        if value is not None:
+            query = query.where(column == value)
+    query = (
+        query.offset((filters.page - 1) * filters.page_size)
+        .limit(filters.page_size)
+        .order_by(VisitorEntry.created_at.desc())
+    )
+    return list((await db.execute(query)).scalars().all())
+
+
+@app.post("/visitors/{entry_id}/approval", response_model=VisitorResponse, tags=["approvals"])
+async def approve_visitor(
+    entry_id: int,
+    payload: ApprovalRequest,
+    approver: Annotated[
+        User,
+        Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)),
+    ],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> VisitorEntry:
+    """Approve or reject a pending visitor entry."""
+    entry = await db.get(VisitorEntry, entry_id)
+    if not entry or entry.status != VisitorStatus.WAITING_FOR_APPROVAL:
+        raise HTTPException(status_code=404, detail="Pending visitor entry not found")
+    if approver.role == UserRole.ADMIN and entry.approver_id not in (None, approver.id):
+        raise HTTPException(status_code=403, detail="Entry is assigned to another approver")
+    entry.approver_id = approver.id
+    entry.status = VisitorStatus.APPROVED if payload.approved else VisitorStatus.REJECTED
+    entry.rejection_reason = None if payload.approved else payload.reason
+    entry.approved_at = datetime.now(timezone.utc) if payload.approved else None
+    db.add(
+        Notification(
+            recipient_id=entry.creator_id,
+            type=NotificationType.VISITOR_APPROVAL,
+            title="Visitor entry updated",
+            message="Your visitor entry was " + entry.status.value.lower(),
+            visitor_entry_id=entry.id,
+        )
+    )
+    await audit(
+        db,
+        approver.id,
+        "VISITOR_" + ("APPROVED" if payload.approved else "REJECTED"),
+        "VisitorEntry",
+        entry.id,
+        {"reason": payload.reason},
+    )
     await db.commit()
-    await db.refresh(visitor)
-    return visitor
+    await db.refresh(entry)
+    return entry
 
 
-@app.get("/visitors", response_model=list[VisitorRead])
-async def list_visitors(db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(current_user)], visitor_status: VisitStatus | None = Query(default=None, alias="status"), location: str | None = None, submitted_by: int | None = None, from_date: date | None = None, to_date: date | None = None, skip: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=200)) -> list[Visitor]:
-    """List visitors with role, location, date, status, and pagination filters."""
-    statement = select(Visitor).order_by(Visitor.created_at.desc())
-    if actor.role == Role.USER:
-        statement = statement.where(Visitor.submitted_by == actor.id)
-    elif actor.role == Role.ADMIN and actor.location:
-        statement = statement.where(Visitor.location == actor.location)
-    if visitor_status:
-        statement = statement.where(Visitor.status == visitor_status.value)
-    if location:
-        statement = statement.where(Visitor.location == location)
-    if submitted_by:
-        statement = statement.where(Visitor.submitted_by == submitted_by)
-    if from_date:
-        statement = statement.where(Visitor.start_date >= from_date)
-    if to_date:
-        statement = statement.where(Visitor.end_date <= to_date)
-    return list((await db.scalars(statement.offset(skip).limit(limit))).all())
-
-
-@app.get("/visitors/{visitor_id}", response_model=VisitorRead)
-async def get_visitor(visitor_id: int, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(current_user)]) -> Visitor:
-    """Return a visitor subject to the caller's visibility rules."""
-    visitor = await db.get(Visitor, visitor_id)
-    if visitor is None or (actor.role == Role.USER and visitor.submitted_by != actor.id) or (actor.role == Role.ADMIN and actor.location != visitor.location):
-        raise HTTPException(status_code=404, detail="Visitor not found")
-    return visitor
-
-
-@app.put("/visitors/{visitor_id}", response_model=VisitorRead)
-async def update_visitor(visitor_id: int, data: VisitorUpdate, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(current_user)]) -> Visitor:
-    """Edit and resubmit a rejected entry; approved entries are immutable for users."""
-    visitor = await get_visitor(visitor_id, db, actor)
-    if visitor.submitted_by != actor.id and actor.role == Role.USER:
-        raise HTTPException(status_code=403, detail="Only the submitter may edit this entry")
-    if visitor.status != VisitStatus.REJECTED.value:
-        raise HTTPException(status_code=409, detail="Only rejected entries may be edited")
-    validate_visitor(data)
-    for key, value in data.model_dump().items():
-        setattr(visitor, key, value)
-    visitor.status = VisitStatus.WAITING.value
-    visitor.rejection_reason = None
-    visitor.updated_at = datetime.now(timezone.utc)
+@app.post("/visitors/{entry_id}/resubmit", response_model=VisitorResponse, tags=["visitors"])
+async def resubmit_visitor(
+    entry_id: int,
+    payload: VisitorCreateRequest,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> VisitorEntry:
+    """Edit a rejected entry and return it to approval."""
+    entry = await db.get(VisitorEntry, entry_id)
+    if not entry or entry.creator_id != user.id or entry.status != VisitorStatus.REJECTED:
+        raise HTTPException(
+            status_code=400,
+            detail="Only your rejected entries can be resubmitted",
+        )
+    values = payload.model_dump()
+    values["photo_metadata"] = payload.photo_metadata.model_dump()
+    values["end_date"] = values["end_date"] or values["visit_date"]
+    for key, value in values.items():
+        setattr(entry, key, value)
+    entry.status = VisitorStatus.WAITING_FOR_APPROVAL
+    entry.rejection_reason = None
+    await audit(db, user.id, "VISITOR_RESUBMITTED", "VisitorEntry", entry.id)
     await db.commit()
-    await db.refresh(visitor)
-    return visitor
+    await db.refresh(entry)
+    return entry
 
 
-@app.post("/visitors/{visitor_id}/approval", response_model=VisitorRead)
-async def approve_visitor(visitor_id: int, decision: ApprovalRequest, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN))]) -> Visitor:
-    """Approve or reject a visitor, requiring a reason for rejection."""
-    visitor = await db.get(Visitor, visitor_id)
-    if visitor is None or (actor.role == Role.ADMIN and actor.location != visitor.location):
-        raise HTTPException(status_code=404, detail="Visitor not found")
-    if visitor.status != VisitStatus.WAITING.value:
-        raise HTTPException(status_code=409, detail="Entry is no longer awaiting approval")
-    if not decision.approved and not decision.rejection_reason:
-        raise HTTPException(status_code=422, detail="A rejection reason is required")
-    visitor.status = VisitStatus.APPROVED.value if decision.approved else VisitStatus.REJECTED.value
-    visitor.rejection_reason = None if decision.approved else decision.rejection_reason
-    visitor.approver_id = actor.id
-    await audit(db, actor, "approve" if decision.approved else "reject", "visitor", visitor.id)
+@app.get("/notifications", response_model=list[NotificationResponse], tags=["notifications"])
+async def notifications(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[Notification]:
+    """Return the current user's unmuted and muted notifications."""
+    return list(
+        (
+            await db.execute(
+                select(Notification)
+                .where(Notification.recipient_id == user.id)
+                .order_by(Notification.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+@app.patch("/notifications/{notification_id}/read", response_model=NotificationResponse, tags=["notifications"])
+async def mark_notification_read(
+    notification_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Notification:
+    """Mark an owned notification as read."""
+    item = await db.get(Notification, notification_id)
+    if not item or item.recipient_id != user.id:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    item.is_read = True
     await db.commit()
-    await db.refresh(visitor)
-    return visitor
+    await db.refresh(item)
+    return item
 
 
-@app.post("/visitors/{visitor_id}/check-in", response_model=VisitorRead)
-async def check_in(visitor_id: int, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(current_user)]) -> Visitor:
-    """Check in an approved visitor during the permitted multi-day period."""
-    visitor = await get_visitor(visitor_id, db, actor)
-    today = date.today()
-    if visitor.status != VisitStatus.APPROVED.value or not visitor.start_date <= today <= visitor.end_date:
-        raise HTTPException(status_code=409, detail="Visitor is not eligible for check-in")
-    visitor.checked_in_at = datetime.now(timezone.utc)
-    await db.commit()
-    await db.refresh(visitor)
-    return visitor
+@app.get("/dashboard/summary", tags=["dashboard"])
+async def dashboard(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, int]:
+    """Return role-scoped visitor workflow counts."""
+    query = select(VisitorEntry.status, func.count(VisitorEntry.id)).group_by(
+        VisitorEntry.status
+    )
+    if user.role == UserRole.USER:
+        query = query.where(VisitorEntry.creator_id == user.id)
+    rows = (await db.execute(query)).all()
+    return {status.value: count for status, count in rows}
 
 
-@app.post("/visitors/{visitor_id}/check-out", response_model=VisitorRead)
-async def check_out(visitor_id: int, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(current_user)]) -> Visitor:
-    """Check out a visitor who has checked in."""
-    visitor = await get_visitor(visitor_id, db, actor)
-    if visitor.checked_in_at is None or visitor.checked_out_at is not None:
-        raise HTTPException(status_code=409, detail="Visitor is not currently checked in")
-    visitor.checked_out_at = datetime.now(timezone.utc)
-    await db.commit()
-    await db.refresh(visitor)
-    return visitor
+@app.get("/reports/visitors", response_model=list[VisitorResponse], tags=["reports"])
+async def report(
+    filters: Annotated[ReportFilters, Depends()],
+    user: Annotated[
+        User,
+        Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)),
+    ],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[VisitorEntry]:
+    """Return a consolidated, role-authorized visitor activity report."""
+    return await list_visitors(user, db, filters)
 
 
-@app.get("/dashboard/statistics")
-async def statistics(db: Annotated[AsyncSession, Depends(get_db)], _: Annotated[User, Depends(current_user)]) -> dict[str, Any]:
-    """Return visitor totals and month-wise activity aggregation."""
-    totals = dict((row[0], row[1]) for row in (await db.execute(select(Visitor.status, func.count(Visitor.id)).group_by(Visitor.status))).all())
-    recent = list((await db.scalars(select(Visitor).order_by(Visitor.created_at.desc()).limit(10))).all())
-    return {"totals": totals, "recent_activity": [VisitorRead.model_validate(item).model_dump(mode="json") for item in recent]}
+@app.get("/reports/visitors/export", tags=["reports"])
+async def export_report(
+    filters: Annotated[ReportFilters, Depends()],
+    format: str = Query(default="csv", pattern="^(csv|xlsx|pdf)$"),
+    user: User = Depends(require_roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Export the same filtered report data as CSV, XLSX, or PDF."""
+    rows = await list_visitors(user, db, filters)
+    if format == "csv":
+        content = (
+            "id,visitor_name,status,visit_date,location_id,creator_id\n"
+            + "\n".join(
+                ",".join(
+                    map(
+                        str,
+                        [
+                            row.id,
+                            row.visitor_name,
+                            row.status.value,
+                            row.visit_date,
+                            row.location_id,
+                            row.creator_id,
+                        ],
+                    )
+                )
+                for row in rows
+            )
+        )
+        return StreamingResponse(
+            io.BytesIO(content.encode()),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=visitors.csv"},
+        )
+    if format == "xlsx":
+        from openpyxl import Workbook
 
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["id", "visitor_name", "status", "visit_date", "location_id", "creator_id"])
+        for row in rows:
+            sheet.append(
+                [
+                    row.id,
+                    row.visitor_name,
+                    row.status.value,
+                    row.visit_date.isoformat(),
+                    row.location_id,
+                    row.creator_id,
+                ]
+            )
+        output = io.BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=visitors.xlsx"},
+        )
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen.canvas import Canvas
 
-@app.get("/reports/visitors.xlsx")
-async def export_excel(db: Annotated[AsyncSession, Depends(get_db)], _: Annotated[User, Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN))]) -> Response:
-    """Export visitor activity as an Excel workbook."""
-    visitors = list((await db.scalars(select(Visitor).order_by(Visitor.created_at))).all())
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(["ID", "Identity", "Location", "Status", "Start", "End", "Visitee"])
-    for item in visitors:
-        sheet.append([item.id, item.identity, item.location, item.status, item.start_date.isoformat(), item.end_date.isoformat(), item.visitee])
     output = io.BytesIO()
-    workbook.save(output)
-    return Response(output.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=visitors.xlsx"})
-
-
-@app.get("/reports/visitors.pdf")
-async def export_pdf(db: Annotated[AsyncSession, Depends(get_db)], _: Annotated[User, Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN))]) -> Response:
-    """Export a concise visitor activity report as PDF."""
-    visitors = list((await db.scalars(select(Visitor).order_by(Visitor.created_at))).all())
-    output = io.BytesIO()
-    document = canvas.Canvas(output, pagesize=A4)
-    document.drawString(40, 800, "Visitor Activity Report")
-    y_position = 775
-    for item in visitors:
-        document.drawString(40, y_position, f"{item.id}: {item.identity} | {item.location} | {item.status}")
-        y_position -= 16
-        if y_position < 40:
-            document.showPage()
-            y_position = 800
-    document.save()
-    return Response(output.getvalue(), media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=visitors.pdf"})
-
-
-@app.put("/notifications/preferences")
-async def notification_preferences(data: PreferenceUpdate, db: Annotated[AsyncSession, Depends(get_db)], actor: Annotated[User, Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN))]) -> PreferenceUpdate:
-    """Configure or mute administrator notifications."""
-    preference = await db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == actor.id))
-    if preference is None:
-        preference = NotificationPreference(user_id=actor.id)
-        db.add(preference)
-    preference.muted = data.muted
-    preference.internet_requests = data.internet_requests
-    await db.commit()
-    return data
+    canvas = Canvas(output, pagesize=letter)
+    canvas.drawString(40, 760, "Visitor Activity Report")
+    for index, row in enumerate(rows[:45]):
+        canvas.drawString(
+            40,
+            740 - index * 15,
+            str(row.id)
+            + " | "
+            + row.visitor_name
+            + " | "
+            + row.status.value
+            + " | "
+            + str(row.visit_date),
+        )
+    canvas.save()
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=visitors.pdf"},
+    )

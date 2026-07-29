@@ -261,3 +261,9 @@ The following enhancements and open action items were identified during the walk
 | Approver | The Admin or Super Admin designated to review and approve/reject a specific visitor entry. |
 | Location Autofill | A feature that pre-populates the office location field based on the device's detected location. |
 | Device Certificate | Credential information captured for a visitor's device to support IT/security provisioning. |
+
+
+
+### Create a new good looking professional website and it should be responsive and looks best and make a functinoal backend that can interact with the DB in the backend and frontend 
+
+### Make sure everything were built seamlessly all data structures must be same from DB, Frontend and backend

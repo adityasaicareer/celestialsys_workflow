@@ -32,14 +32,14 @@ services:
       - POSTGRES_PORT=5432
       - POSTGRES_DB=app_db
       - POSTGRES_USER=app_user
-      - POSTGRES_PASSWORD=MTWwuS&ld6uyD!rnCReW$8PZ6TcY@rT6
-      - DATABASE_URL=postgresql://app_user:MTWwuS&ld6uyD!rnCReW$8PZ6TcY@rT6@postgres:5432/app_db
+      - POSTGRES_PASSWORD=gZc16741UPPYiy*9tA70M9ooIrnRaZet
+      - DATABASE_URL=postgresql://app_user:gZc16741UPPYiy*9tA70M9ooIrnRaZet@postgres:5432/app_db
       - MONGO_HOST=mongo
       - MONGO_PORT=27017
       - MONGO_DB=app_db
       - MONGO_USER=app_user
-      - MONGO_PASSWORD=JHNjckVc$b0YutzDw#p8YqCrvK$tNKa8
-      - MONGO_URL=mongodb://app_user:JHNjckVc$b0YutzDw#p8YqCrvK$tNKa8@mongo:27017/app_db?authSource=admin
+      - MONGO_PASSWORD=M#e#kb7HZP&xMB!$Uqb78L&GsmqOtY9#
+      - MONGO_URL=mongodb://app_user:M#e#kb7HZP&xMB!$Uqb78L&GsmqOtY9#@mongo:27017/app_db?authSource=admin
     depends_on:
       - postgres
       - mongo
@@ -54,7 +54,7 @@ services:
     environment:
       - POSTGRES_DB=app_db
       - POSTGRES_USER=app_user
-      - POSTGRES_PASSWORD=MTWwuS&ld6uyD!rnCReW$8PZ6TcY@rT6
+      - POSTGRES_PASSWORD=gZc16741UPPYiy*9tA70M9ooIrnRaZet
     ports:
       - "5432:5432"
     volumes:
@@ -74,7 +74,7 @@ services:
     container_name: workflow_mongo
     environment:
       - MONGO_INITDB_ROOT_USERNAME=app_user
-      - MONGO_INITDB_ROOT_PASSWORD=JHNjckVc$b0YutzDw#p8YqCrvK$tNKa8
+      - MONGO_INITDB_ROOT_PASSWORD=M#e#kb7HZP&xMB!$Uqb78L&GsmqOtY9#
       - MONGO_INITDB_DATABASE=app_db
     ports:
       - "27017:27017"

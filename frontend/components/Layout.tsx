@@ -1,4 +1,48 @@
-import Link from 'next/link'; import { useRouter } from 'next/router'; import { useAuth } from './AuthProvider';
-interface Props { children: React.ReactNode; }
-const links = [{ href: '/dashboard', label: 'Dashboard', roles: ['admin','approver','receptionist','security','employee'] }, { href: '/users', label: 'Users', roles: ['admin'] }, { href: '/approvals', label: 'Approvals', roles: ['admin','approver'] }, { href: '/reports', label: 'Reports', roles: ['admin','approver'] }, { href: '/visitors/create', label: 'Create Visitor', roles: ['admin','approver','receptionist','employee'] }, { href: '/settings', label: 'Settings', roles: ['admin','approver','receptionist','security','employee'] }];
-export default function Layout({ children }: Props): JSX.Element { const { user, logout } = useAuth(); const router = useRouter(); return <div className="min-h-screen md:flex"><aside className="w-full bg-slate-950 p-4 text-white md:min-h-screen md:w-64"><div className="mb-6 text-xl font-bold">VisitorHub</div><p className="mb-4 text-xs text-slate-400">{user?.name} · {user?.role}</p><nav aria-label="Primary navigation" className="flex gap-2 overflow-x-auto md:block">{links.filter(x => user && x.roles.includes(user.role)).map(link => <Link key={link.href} href={link.href} className={`mb-1 block whitespace-nowrap rounded-lg px-3 py-2 text-sm hover:bg-slate-800 ${router.pathname === link.href ? 'bg-blue-600' : ''}`}>{link.label}</Link>)}<button onClick={() => { logout(); router.push('/'); }} className="mt-2 block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-800" aria-label="Log out">Logout</button></nav></aside><div className="min-w-0 flex-1"><header className="border-b bg-white px-4 py-4 md:px-8"><h1 className="text-lg font-semibold">{links.find(x => x.href === router.pathname)?.label || 'Visitor Management'}</h1></header><main className="p-4 md:p-8">{children}</main></div></div>; }
+import Link from 'next/link';
+import { useRouter } from 'next/router';
+import { useAuth } from '../lib/auth';
+import { useState } from 'react';
+
+interface LayoutProps {
+  children: React.ReactNode;
+  title: string;
+  subtitle?: string;
+}
+
+const navigation = [
+  { href: '/dashboard', label: 'Overview', icon: '◈' },
+  { href: '/visitors/new', label: 'Create visitor', icon: '+' },
+  { href: '/approvals', label: 'Approvals', icon: '✓' },
+  { href: '/reports', label: 'Reports', icon: '▤' },
+  { href: '/admin/users', label: 'User management', icon: '◎', admin: true },
+  { href: '/settings', label: 'Settings', icon: '⚙' }
+];
+
+export default function Layout({ children, title, subtitle }: LayoutProps) {
+  const router = useRouter();
+  const { user, logout } = useAuth();
+  const [open, setOpen] = useState(false);
+  const isAdmin = user?.role === 'SUPER_ADMIN';
+
+  return (
+    <div className="app-shell">
+      <aside className={`sidebar ${open ? 'sidebar-open' : ''}`}>
+        <div className="brand"><span className="brand-mark">G</span><span>gatekeeper</span></div>
+        <div className="workspace"><span className="location-dot" /> {user?.location || 'All locations'} <span className="chevron">⌄</span></div>
+        <nav aria-label="Main navigation">
+          <span className="nav-label">Workspace</span>
+          {navigation.map((item) => {
+            if (item.admin && !isAdmin) return null;
+            const active = router.pathname === item.href || router.pathname.startsWith(`${item.href}/`);
+            return <Link key={item.href} href={item.href} className={`nav-link ${active ? 'active' : ''}`} onClick={() => setOpen(false)}><span className="nav-icon">{item.icon}</span>{item.label}{item.href === '/approvals' && <span className="nav-badge">8</span>}</Link>;
+          })}
+        </nav>
+        <div className="sidebar-footer"><div className="help-box"><strong>Need help?</strong><span>Visit the operations guide</span><a href="mailto:support@gatekeeper.app">Contact support →</a></div><button className="logout" onClick={logout}>↗ Sign out</button></div>
+      </aside>
+      <div className="main-area">
+        <header className="topbar"><button className="mobile-menu" aria-label="Open navigation" onClick={() => setOpen(!open)}>☰</button><div className="topbar-actions"><button className="icon-button" aria-label="Notifications">♢<span className="notification-dot" /></button><div className="user-menu"><span className="avatar">{user?.name?.slice(0, 2).toUpperCase() || 'AK'}</span><span className="user-name">{user?.name || 'Alex Kim'}<small>{user?.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Approver'}</small></span><span>⌄</span></div></div></header>
+        <main className="content"><div className="page-heading"><div><span className="eyebrow">{user?.location || 'OPERATIONS'}</span><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>{router.pathname === '/dashboard' && <button className="button primary" onClick={() => router.push('/visitors/new')}>＋ New visitor</button>}</div>{children}</main>
+      </div>
+    </div>
+  );
+}

@@ -1,7 +1,0 @@
-import { createContext, useContext, useEffect, useState } from 'react';
-import { AuthState, User } from '../lib/types';
-interface AuthContextValue extends AuthState { login: (user: User) => void; logout: () => void; }
-const AuthContext = createContext<AuthContextValue | undefined>(undefined);
-const demoUser: User = { id: '1', name: 'Alex Morgan', email: 'alex@example.com', role: 'admin', organization: 'Acme Corp', active: true };
-export function AuthProvider({ children }: { children: React.ReactNode }): JSX.Element { const [state, setState] = useState<AuthState>({ user: null, loading: true }); useEffect(() => { const saved = localStorage.getItem('visitor_user'); setState({ user: saved ? JSON.parse(saved) as User : demoUser, loading: false }); }, []); const login = (user: User) => { localStorage.setItem('visitor_user', JSON.stringify(user)); setState({ user, loading: false }); }; const logout = () => { localStorage.removeItem('visitor_user'); setState({ user: null, loading: false }); }; return <AuthContext.Provider value={{ ...state, login, logout }}>{children}</AuthContext.Provider>; }
-export function useAuth(): AuthContextValue { const context = useContext(AuthContext); if (!context) throw new Error('useAuth must be used inside AuthProvider'); return context; }

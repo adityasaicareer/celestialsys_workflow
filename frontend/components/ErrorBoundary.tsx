@@ -1,8 +1,35 @@
 import React from 'react';
-interface Props { children: React.ReactNode; fallback?: React.ReactNode; }
-interface State { hasError: boolean; error?: Error; }
-export default class ErrorBoundary extends React.Component<Props, State> {
-  public state: State = { hasError: false };
-  static getDerivedStateFromError(error: Error): State { return { hasError: true, error }; }
-  render(): React.ReactNode { if (this.state.hasError) return this.props.fallback || <main className="p-8"><h1 className="text-xl font-bold">Something went wrong</h1><p className="mt-2 text-slate-600">Please refresh and try again.</p></main>; return this.props.children; }
+
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+  fallback?: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error?: Error;
+}
+
+export default class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  public state: ErrorBoundaryState = { hasError: false };
+
+  public static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  public render() {
+    if (this.state.hasError) {
+      return this.props.fallback || (
+        <main className="error-page">
+          <div className="error-card">
+            <span className="eyebrow">SYSTEM MESSAGE</span>
+            <h1>Something went wrong</h1>
+            <p>{this.state.error?.message || 'Please refresh and try again.'}</p>
+            <button className="button primary" onClick={() => window.location.reload()}>Reload application</button>
+          </div>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
 }

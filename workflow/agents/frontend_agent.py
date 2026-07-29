@@ -661,16 +661,48 @@ Package.json Template:
 }}
 ```
 
+**CODE FORMATTING REQUIREMENTS (CRITICAL):**
+1. ALL code MUST be properly formatted and readable
+2. Use proper indentation (2 spaces for TypeScript/React)
+3. Add line breaks between elements and components
+4. DO NOT minify or uglify code - write clean, readable code
+5. Each JSX element should be on its own line (or properly broken across lines)
+6. Add blank lines between functions and components for readability
+7. Format code as if you were writing it in a code editor, not minified
+
+**WRONG (minified/single-line):**
+```typescript
+import {{useState}} from 'react'; export default function Page(){{const [x,setX]=useState(0);return <div><h1>Title</h1><button onClick={{()=>setX(x+1)}}>Click</button></div>;}}
+```
+
+**CORRECT (properly formatted):**
+```typescript
+import {{ useState }} from 'react';
+
+export default function Page() {{
+  const [x, setX] = useState(0);
+  
+  return (
+    <div>
+      <h1>Title</h1>
+      <button onClick={{() => setX(x + 1)}}>
+        Click
+      </button>
+    </div>
+  );
+}}
+```
+
 Output Format:
 Return ONLY a valid JSON object (no markdown, no explanations):
 {{
   "files": {{
-    "pages/_app.tsx": "// App wrapper code...",
-    "pages/_document.tsx": "// Document code...",
-    "pages/index.tsx": "// Home page code...",
-    "components/ErrorBoundary.tsx": "// Error boundary...",
-    "components/Loading.tsx": "// Loading component...",
-    "lib/api.ts": "// API client...",
+    "pages/_app.tsx": "// App wrapper code with proper formatting and line breaks...",
+    "pages/_document.tsx": "// Document code with proper formatting...",
+    "pages/index.tsx": "// Home page code with proper formatting...",
+    "components/ErrorBoundary.tsx": "// Error boundary with proper formatting...",
+    "components/Loading.tsx": "// Loading component with proper formatting...",
+    "lib/api.ts": "// API client with proper formatting...",
     "styles/globals.css": "// Global styles...",
     "package.json": "{{ dependencies... }}",
     "next.config.js": "// Next.js config...",
@@ -697,6 +729,13 @@ Previous generation had quality issues. Your task:
    - Accessibility (WCAG AA: ARIA labels, semantic HTML)
    - Error boundaries and loading states
    - All required features implemented
+   - **PROPER CODE FORMATTING** - readable, not minified
+
+**CRITICAL: PROPER CODE FORMATTING**
+- ALL code MUST be properly formatted with line breaks and indentation
+- DO NOT minify or compress code into single lines
+- Use proper spacing, indentation, and line breaks
+- Make code readable as if written in a code editor
 
 Common issues to fix:
 - Missing TypeScript types: Add interface/type definitions
@@ -706,11 +745,12 @@ Common issues to fix:
 - Missing loading states: Add loading spinners/skeletons
 - Wrong file structure: Follow Next.js conventions
 - Missing dependencies: Add to package.json
+- **Minified/single-line code: Reformat with proper indentation and line breaks**
 
-Return corrected code in same JSON format:
+Return corrected code in same JSON format with PROPER FORMATTING:
 {{
   "files": {{
-    "pages/_app.tsx": "// Fixed code...",
+    "pages/_app.tsx": "// Fixed code with proper formatting, line breaks, and indentation...",
     ...
   }}
 }}
@@ -959,6 +999,43 @@ module.exports = nextConfig
         
         return results
     
+    def _install_dependencies(self, output_dir: str) -> bool:
+        """
+        Install npm dependencies in the frontend directory.
+        
+        Args:
+            output_dir: Frontend directory path
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            print(f"   📦 Installing npm dependencies...")
+            result = subprocess.run(
+                ["npm", "install"],
+                cwd=output_dir,
+                capture_output=True,
+                text=True,
+                timeout=180  # 3 minutes timeout
+            )
+            
+            if result.returncode == 0:
+                print(f"      ✅ Dependencies installed successfully")
+                return True
+            else:
+                print(f"      ⚠️  npm install failed: {result.stderr[:200]}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print(f"      ⚠️  npm install timed out after 3 minutes")
+            return False
+        except FileNotFoundError:
+            print(f"      ⚠️  npm not found - please install Node.js")
+            return False
+        except Exception as e:
+            print(f"      ⚠️  Error installing dependencies: {str(e)}")
+            return False
+    
     def execute_task(
         self,
         task_description: str,
@@ -1029,6 +1106,9 @@ module.exports = nextConfig
             
             # Write code to files
             self.write_code(files, output_dir)
+            
+            # Install npm dependencies
+            self._install_dependencies(output_dir)
             
             # Evaluate code quality
             evaluation = self.evaluate_code(output_dir, task_description)

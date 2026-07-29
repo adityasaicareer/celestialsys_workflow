@@ -188,7 +188,7 @@ class DatabaseAgent:
             
             # Wait for database to be ready
             connection_string = (
-                f"postgresql://{username}:{password}@localhost:"
+                f"postgresql+asyncpg://{username}:{password}@localhost:"
                 f"{self.config.postgres_port}/{database_name}"
             )
             

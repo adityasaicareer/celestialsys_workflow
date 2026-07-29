@@ -1,569 +1,458 @@
 import asyncio
-import base64
-import hashlib
-import hmac
-import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import main
-from main import (
-    ApprovalRequest,
-    Base,
-    Role,
+from database import Base, get_db
+from models.entities import (
+    AuditLog,
+    Location,
+    Notification,
+    NotificationType,
+    Organization,
+    PasswordResetToken,
     User,
-    UserCreate,
-    VisitorCreate,
-    VisitStatus,
-    app,
-    create_token,
-    decode_token,
-    get_db,
-    hash_password,
-    validate_visitor,
-    verify_password,
+    UserRole,
+    UserStatus,
+    VisitorEntry,
+    VisitorStatus,
+    PassType,
 )
+from security import hash_password
 
 
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-test_engine = create_async_engine(
-    TEST_DATABASE_URL,
+DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+engine = create_async_engine(
+    DATABASE_URL,
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )
-TestingSessionLocal = async_sessionmaker(test_engine, expire_on_commit=False)
+TestingSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def override_get_db():
-    async with TestingSessionLocal() as session:
-        yield session
+def run(coro):
+    return asyncio.run(coro)
 
 
-app.dependency_overrides[get_db] = override_get_db
-# Prevent the application startup handler from creating and seeding the production database.
-app.router.on_startup.clear()
-client = TestClient(app)
+async def _create_tables():
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+
+async def _drop_tables():
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+
+
+async def _get_user(user_id: int):
+    async with TestingSessionLocal() as db:
+        return await db.get(User, user_id)
+
+
+async def _seed_user(
+    email="user@example.com",
+    role=UserRole.USER,
+    status=UserStatus.ACTIVE,
+    organization_id=None,
+    password="StrongPass1!",
+):
+    async with TestingSessionLocal() as db:
+        user = User(
+            email=email,
+            full_name="Test User",
+            password_hash=hash_password(password),
+            role=role,
+            status=status,
+            organization_id=organization_id,
+            is_soft_deleted=False,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        return user.id
+
+
+async def _seed_org_and_location():
+    async with TestingSessionLocal() as db:
+        organization = Organization(name="Test Organization", code="TEST")
+        db.add(organization)
+        await db.flush()
+        location = Location(
+            organization_id=organization.id,
+            name="Main Entrance",
+            address="1 Main Street",
+        )
+        db.add(location)
+        await db.commit()
+        await db.refresh(organization)
+        await db.refresh(location)
+        return organization.id, location.id
+
+
+async def _seed_visitor(creator_id, location_id, status=VisitorStatus.WAITING_FOR_APPROVAL):
+    async with TestingSessionLocal() as db:
+        entry = VisitorEntry(
+            creator_id=creator_id,
+            location_id=location_id,
+            visitor_name="Jane Visitor",
+            visitor_email="jane@example.com",
+            visitor_phone="5551234567",
+            company="Example Corp",
+            purpose="Business meeting",
+            visit_date=date(2030, 1, 15),
+            end_date=date(2030, 1, 15),
+            pass_type=PassType.SINGLE_DAY,
+            photo_metadata={"filename": "photo.jpg"},
+            consent=True,
+            status=status,
+        )
+        db.add(entry)
+        await db.commit()
+        await db.refresh(entry)
+        return entry.id
 
 
 @pytest.fixture(autouse=True)
-def setup_database():
-    async def setup():
-        async with test_engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+def database():
+    run(_create_tables())
 
-    async def teardown():
-        async with test_engine.begin() as connection:
-            await connection.run_sync(Base.metadata.drop_all)
+    async def override_get_db():
+        async with TestingSessionLocal() as db:
+            yield db
 
-    asyncio.run(setup())
+    main.app.dependency_overrides[get_db] = override_get_db
     yield
-    asyncio.run(teardown())
+    main.app.dependency_overrides.clear()
+    run(_drop_tables())
 
 
 @pytest.fixture
-def users():
-    async def create_users():
-        async with TestingSessionLocal() as db:
-            super_admin = User(
-                email="super@example.com",
-                full_name="Super Administrator",
-                password_hash=hash_password("SuperPass123"),
-                role=Role.SUPER_ADMIN.value,
-                active=True,
-                location="WTC",
-            )
-            admin = User(
-                email="admin@example.com",
-                full_name="Location Admin",
-                password_hash=hash_password("AdminPass123"),
-                role=Role.ADMIN.value,
-                active=True,
-                location="WTC",
-            )
-            user = User(
-                email="user@example.com",
-                full_name="Regular User",
-                password_hash=hash_password("UserPass123"),
-                role=Role.USER.value,
-                active=True,
-                location="WTC",
-            )
-            pending = User(
-                email="pending@example.com",
-                full_name="Pending User",
-                password_hash=hash_password("Pending123"),
-                role=Role.USER.value,
-                active=False,
-                location="WTC",
-            )
-            db.add_all([super_admin, admin, user, pending])
-            await db.commit()
-            for item in [super_admin, admin, user, pending]:
-                await db.refresh(item)
-            return {
-                "super": super_admin,
-                "admin": admin,
-                "user": user,
-                "pending": pending,
-            }
-
-    return asyncio.run(create_users())
+def client():
+    return TestClient(main.app)
 
 
-def auth_headers(user):
-    return {"Authorization": f"Bearer {create_token(user)}"}
+def set_authenticated_user(user_id):
+    async def override_current_user():
+        return await _get_user(user_id)
+
+    main.app.dependency_overrides[main.current_user] = override_current_user
 
 
-def visitor_payload(**overrides):
-    payload = {
-        "identity": "Jane Visitor",
-        "phone": "9876543210",
-        "email": "jane.visitor@example.com",
-        "pass_type": "Day Pass",
-        "start_date": date.today().isoformat(),
-        "end_date": (date.today() + timedelta(days=2)).isoformat(),
-        "origin": "Acme Corporation",
-        "visitee": "John Employee",
-        "approver_id": 1,
-        "location": "WTC",
-        "consent": True,
-        "id_proof": "passport.pdf",
-        "photo_data": "data:image/png;base64," + ("a" * 30),
-        "access_card": {"number": "A-1"},
-        "device_certificate": {"serial": "device-1"},
-        "internet_access_requested": True,
-    }
-    payload.update(overrides)
-    return payload
+def test_health_returns_status_and_environment(client):
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert "environment" in response.json()
 
 
-def test_password_hash_and_verify():
-    password = "CorrectHorseBatteryStaple"
-    encoded = hash_password(password)
+def test_register_creates_pending_user_and_normalizes_email(client, monkeypatch):
+    monkeypatch.setattr(main, "hash_password", lambda value: "hashed-password")
 
-    assert encoded != password
-    assert verify_password(password, encoded) is True
-    assert verify_password("wrong-password", encoded) is False
-    assert verify_password(password, "not-valid-base64") is False
-    assert verify_password(password, "") is False
-
-
-def test_token_creation_and_decoding(users):
-    token = create_token(users["user"], minutes=5)
-    payload = decode_token(token)
-
-    assert payload["sub"] == users["user"].id
-    assert payload["role"] == Role.USER.value
-    assert payload["exp"] > int(datetime.now(timezone.utc).timestamp())
-
-
-def test_decode_token_rejects_bad_signature_and_malformed_tokens():
-    with pytest.raises(HTTPException) as bad_signature:
-        decode_token("abc.invalid")
-    assert bad_signature.value.status_code == 401
-
-    for token in ["", "one", "a.b.c", "%%% .signature"]:
-        with pytest.raises(HTTPException) as error:
-            decode_token(token)
-        assert error.value.status_code == 401
-
-
-def test_decode_token_rejects_expired_token(monkeypatch, users):
-    expired = create_token(users["user"], minutes=-1)
-    with pytest.raises(HTTPException) as error:
-        decode_token(expired)
-    assert error.value.status_code == 401
-
-
-def test_register_creates_inactive_user():
     response = client.post(
         "/auth/register",
         json={
-            "email": "New.User@Example.com",
+            "email": "NEWUSER@EXAMPLE.COM",
             "full_name": "New User",
-            "password": "NewPassword123",
-            "organization": "Example Org",
-            "location": "Noida",
+            "password": "StrongPass1!",
+            "phone": "5550001111",
         },
     )
 
     assert response.status_code == 201
     body = response.json()
-    assert body["email"] == "new.user@example.com"
-    assert body["active"] is False
-    assert body["role"] == "user"
-    assert "password_hash" not in body
+    assert body["email"] == "newuser@example.com"
+    assert body["full_name"] == "New User"
+    assert body["status"] == UserStatus.PENDING.value
+    assert body["role"] == UserRole.USER.value
+
+    created = run(_get_user(body["id"]))
+    assert created.password_hash == "hashed-password"
 
 
-def test_register_rejects_duplicate_email(users):
+def test_register_rejects_duplicate_email(client):
+    run(_seed_user(email="duplicate@example.com", status=UserStatus.PENDING))
+
     response = client.post(
         "/auth/register",
         json={
-            "email": "USER@example.com",
-            "full_name": "Another User",
-            "password": "AnotherPassword123",
+            "email": "DUPLICATE@example.com",
+            "full_name": "Duplicate User",
+            "password": "StrongPass1!",
         },
     )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "Email already registered"
+    assert response.json() == {"detail": "Email is already registered"}
 
 
-@pytest.mark.parametrize(
-    "email,password,expected_status,detail",
-    [
-        ("user@example.com", "UserPass123", 200, None),
-        ("user@example.com", "wrongpass", 401, "Invalid credentials"),
-        ("missing@example.com", "UserPass123", 401, "Invalid credentials"),
-        ("pending@example.com", "Pending123", 403, "User approval is pending"),
-    ],
-)
-def test_login_cases(users, email, password, expected_status, detail):
-    response = client.post("/auth/login", json={"email": email, "password": password})
+def test_login_returns_token_for_active_user(client, monkeypatch):
+    user_id = run(_seed_user(email="active@example.com"))
+    monkeypatch.setattr(main, "create_token", lambda subject, claims=None: "test-token")
 
-    assert response.status_code == expected_status
-    if expected_status == 200:
-        assert response.json()["token_type"] == "bearer"
-        assert response.json()["access_token"]
-    else:
-        assert response.json()["detail"] == detail
-
-
-def test_password_reset_request_is_non_disclosing_and_notifies_existing_user(monkeypatch, users):
-    messages = []
-
-    async def fake_notification(message):
-        messages.append(message)
-
-    monkeypatch.setattr(main, "send_notification", fake_notification)
-
-    response = client.post("/auth/password-reset/request", json={"email": "user@example.com"})
-    unknown = client.post("/auth/password-reset/request", json={"email": "unknown@example.com"})
-
-    assert response.status_code == 200
-    assert response.json()["message"].startswith("If the account exists")
-    assert unknown.status_code == 200
-    assert len(messages) == 1
-    assert "Password reset token:" in messages[0]
-
-
-def test_password_reset_confirm_updates_password(users):
-    token = create_token(users["user"], minutes=30)
     response = client.post(
-        "/auth/password-reset/confirm",
-        json={"token": token, "password": "UpdatedPassword123"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {"message": "Password updated"}
-    login = client.post(
         "/auth/login",
-        json={"email": "user@example.com", "password": "UpdatedPassword123"},
+        json={"email": "ACTIVE@example.com", "password": "StrongPass1!"},
     )
-    assert login.status_code == 200
 
-
-def test_authentication_is_required(users):
-    response = client.get("/visitors")
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Authentication required"
-
-
-def test_users_list_and_update_permissions(users):
-    response = client.get("/users", headers=auth_headers(users["admin"]))
     assert response.status_code == 200
-    assert len(response.json()) == 4
+    assert response.json()["access_token"] == "test-token"
+    assert response.json()["token_type"] == "bearer"
+    assert user_id > 0
 
-    forbidden = client.patch(
-        f"/users/{users['user'].id}",
-        headers=auth_headers(users["admin"]),
-        json={"role": "admin"},
+
+def test_login_rejects_invalid_password(client):
+    run(_seed_user(email="active@example.com"))
+
+    response = client.post(
+        "/auth/login",
+        json={"email": "active@example.com", "password": "wrong-password"},
     )
-    assert forbidden.status_code == 403
-    assert "Only super administrators" in forbidden.json()["detail"]
 
-    updated = client.patch(
-        f"/users/{users['user'].id}",
-        headers=auth_headers(users["super"]),
-        json={"full_name": "Updated Name", "role": "admin", "active": False},
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid email or password"
+
+
+def test_login_rejects_pending_user(client):
+    run(_seed_user(email="pending@example.com", status=UserStatus.PENDING))
+
+    response = client.post(
+        "/auth/login",
+        json={"email": "pending@example.com", "password": "StrongPass1!"},
     )
-    assert updated.status_code == 200
-    assert updated.json()["full_name"] == "Updated Name"
-    assert updated.json()["role"] == "admin"
-    assert updated.json()["active"] is False
 
-
-def test_users_list_rejects_regular_user(users):
-    response = client.get("/users", headers=auth_headers(users["user"]))
     assert response.status_code == 403
-    assert response.json()["detail"] == "Insufficient permissions"
+    assert response.json()["detail"] == "Account is waiting for administrator approval"
 
 
-def test_delete_user_soft_deletes_and_hides_user(users):
-    response = client.delete(
-        f"/users/{users['pending'].id}",
-        headers=auth_headers(users["admin"]),
-    )
-    assert response.status_code == 204
-    assert response.content == b""
+def test_me_returns_authenticated_user(client):
+    user_id = run(_seed_user(email="me@example.com"))
+    set_authenticated_user(user_id)
 
-    listed = client.get("/users", headers=auth_headers(users["super"]))
-    assert all(item["id"] != users["pending"].id for item in listed.json())
+    response = client.get("/auth/me")
 
-    missing = client.delete(
-        f"/users/{users['pending'].id}",
-        headers=auth_headers(users["admin"]),
-    )
-    assert missing.status_code == 404
+    assert response.status_code == 200
+    assert response.json()["email"] == "me@example.com"
 
 
-def test_validate_visitor_rejects_invalid_data():
-    cases = [
-        (visitor_payload(end_date=(date.today() - timedelta(days=1)).isoformat()), "end_date cannot precede start_date"),
-        (visitor_payload(location="Bangalore"), "Location must be WTC, Jayanagar, or Noida"),
-        (visitor_payload(consent=False), "Visitor consent is mandatory"),
-        (visitor_payload(photo_data="not-a-photo"), "A camera-captured photo is mandatory"),
-    ]
-    for payload, detail in cases:
-        with pytest.raises(HTTPException) as error:
-            validate_visitor(VisitorCreate.model_validate(payload))
-        assert error.value.status_code == 422
-        assert error.value.detail == detail
+def test_current_user_rejects_invalid_bearer_token(client, monkeypatch):
+    monkeypatch.setattr(main, "decode_token", lambda token: {"invalid": "payload"})
+
+    response = client.get("/auth/me", headers={"Authorization": "Bearer bad-token"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid authentication credentials"
 
 
-def test_create_visitor_requires_approver_for_regular_users(users):
+def test_password_reset_request_does_not_disclose_unknown_email(client):
     response = client.post(
-        "/visitors",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=None),
+        "/auth/password-reset/request",
+        json={"email": "unknown@example.com"},
     )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "message": "If the account exists, reset instructions have been sent"
+    }
+
+
+@pytest.mark.parametrize("export_format,media_type,filename", [
+    ("csv", "text/csv; charset=utf-8", "visitors.csv"),
+    (
+        "xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "visitors.xlsx",
+    ),
+    ("pdf", "application/pdf", "visitors.pdf"),
+])
+def test_export_report_formats(client, export_format, media_type, filename):
+    organization_id, location_id = run(_seed_org_and_location())
+    admin_id = run(
+        _seed_user(
+            email="admin@example.com",
+            role=UserRole.ADMIN,
+            organization_id=organization_id,
+        )
+    )
+    run(_seed_visitor(admin_id, location_id, VisitorStatus.APPROVED))
+    set_authenticated_user(admin_id)
+
+    response = client.get(f"/reports/visitors/export?format={export_format}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(media_type)
+    assert filename in response.headers["content-disposition"]
+    assert len(response.content) > 0
+    if export_format == "csv":
+        assert b"visitor_name" in response.content
+        assert b"Jane Visitor" in response.content
+
+
+def test_export_report_rejects_unknown_format(client):
+    response = client.get("/reports/visitors/export?format=xml")
+
     assert response.status_code == 422
-    assert response.json()["detail"] == "An approver is required"
 
 
-def test_visitor_approval_rejection_resubmission_and_checkin_checkout(users):
-    created = client.post(
-        "/visitors",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=users["admin"].id),
+def test_create_visitor_defaults_end_date_and_creates_audit_log(client):
+    organization_id, location_id = run(_seed_org_and_location())
+    user_id = run(
+        _seed_user(email="creator@example.com", organization_id=organization_id)
     )
-    assert created.status_code == 201
-    visitor_id = created.json()["id"]
-    assert created.json()["status"] == VisitStatus.WAITING.value
+    set_authenticated_user(user_id)
 
-    rejected_without_reason = client.post(
-        f"/visitors/{visitor_id}/approval",
-        headers=auth_headers(users["admin"]),
-        json={"approved": False},
-    )
-    assert rejected_without_reason.status_code == 422
-
-    rejected = client.post(
-        f"/visitors/{visitor_id}/approval",
-        headers=auth_headers(users["admin"]),
-        json={"approved": False, "rejection_reason": "Missing authorization"},
-    )
-    assert rejected.status_code == 200
-    assert rejected.json()["status"] == VisitStatus.REJECTED.value
-
-    resubmitted = client.put(
-        f"/visitors/{visitor_id}",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=users["admin"].id, visitee="Updated Employee"),
-    )
-    assert resubmitted.status_code == 200
-    assert resubmitted.json()["status"] == VisitStatus.WAITING.value
-    assert resubmitted.json()["rejection_reason"] is None
-
-    approved = client.post(
-        f"/visitors/{visitor_id}/approval",
-        headers=auth_headers(users["admin"]),
-        json={"approved": True},
-    )
-    assert approved.status_code == 200
-    assert approved.json()["status"] == VisitStatus.APPROVED.value
-
-    checked_in = client.post(
-        f"/visitors/{visitor_id}/check-in",
-        headers=auth_headers(users["user"]),
-    )
-    assert checked_in.status_code == 200
-    assert checked_in.json()["checked_in_at"] is not None
-
-    checked_out = client.post(
-        f"/visitors/{visitor_id}/check-out",
-        headers=auth_headers(users["user"]),
-    )
-    assert checked_out.status_code == 200
-    assert checked_out.json()["checked_out_at"] is not None
-
-    second_checkout = client.post(
-        f"/visitors/{visitor_id}/check-out",
-        headers=auth_headers(users["user"]),
-    )
-    assert second_checkout.status_code == 409
-
-
-def test_visitor_visibility_and_filters(users):
-    own = client.post(
-        "/visitors",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=users["admin"].id),
-    )
-    assert own.status_code == 201
-    visitor_id = own.json()["id"]
-
-    visible = client.get("/visitors", headers=auth_headers(users["user"]))
-    assert len(visible.json()) == 1
-    assert visible.json()[0]["id"] == visitor_id
-
-    filtered = client.get(
-        "/visitors",
-        headers=auth_headers(users["admin"]),
-        params={"status": "waiting_for_approval", "location": "WTC", "limit": 1},
-    )
-    assert filtered.status_code == 200
-    assert len(filtered.json()) == 1
-
-    hidden = client.get(
-        f"/visitors/{visitor_id}",
-        headers=auth_headers(users["pending"]),
-    )
-    assert hidden.status_code == 403
-
-
-def test_visitor_update_only_allows_rejected_entries(users):
-    created = client.post(
-        "/visitors",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=users["admin"].id),
-    )
-    visitor_id = created.json()["id"]
-    response = client.put(
-        f"/visitors/{visitor_id}",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=users["admin"].id),
-    )
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Only rejected entries may be edited"
-
-
-def test_approval_location_and_non_waiting_errors(users):
-    created = client.post(
-        "/visitors",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=users["admin"].id),
-    )
-    visitor_id = created.json()["id"]
-
-    wrong_location_admin = users["admin"]
-    wrong_location_admin.location = "Noida"
-    async def change_location():
-        async with TestingSessionLocal() as db:
-            item = await db.get(User, wrong_location_admin.id)
-            item.location = "Noida"
-            await db.commit()
-    asyncio.run(change_location())
-
-    forbidden = client.post(
-        f"/visitors/{visitor_id}/approval",
-        headers=auth_headers(wrong_location_admin),
-        json={"approved": True},
-    )
-    assert forbidden.status_code == 404
-
-    approved = client.post(
-        f"/visitors/{visitor_id}/approval",
-        headers=auth_headers(users["super"]),
-        json={"approved": True},
-    )
-    assert approved.status_code == 200
-
-    again = client.post(
-        f"/visitors/{visitor_id}/approval",
-        headers=auth_headers(users["super"]),
-        json={"approved": True},
-    )
-    assert again.status_code == 409
-
-
-def test_checkin_rejects_non_approved_visitor(users):
-    created = client.post(
-        "/visitors",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=users["admin"].id),
-    )
     response = client.post(
-        f"/visitors/{created.json()['id']}/check-in",
-        headers=auth_headers(users["user"]),
-    )
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Visitor is not eligible for check-in"
-
-
-def test_dashboard_statistics_and_report_exports(users):
-    created = client.post(
         "/visitors",
-        headers=auth_headers(users["user"]),
-        json=visitor_payload(approver_id=users["admin"].id),
+        json={
+            "location_id": location_id,
+            "visitor_name": "Visitor One",
+            "visitor_email": "visitor@example.com",
+            "visitor_phone": "5551234567",
+            "purpose": "Interview",
+            "visit_date": "2030-02-01",
+            "pass_type": "Single Day",
+            "photo_metadata": {"filename": "visitor.jpg"},
+            "consent": True,
+        },
     )
-    assert created.status_code == 201
 
-    stats = client.get("/dashboard/statistics", headers=auth_headers(users["user"]))
-    assert stats.status_code == 200
-    assert stats.json()["totals"][VisitStatus.WAITING.value] == 1
-    assert len(stats.json()["recent_activity"]) == 1
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == VisitorStatus.WAITING_FOR_APPROVAL.value
+    assert body["end_date"] == "2030-02-01"
 
-    excel = client.get("/reports/visitors.xlsx", headers=auth_headers(users["admin"]))
-    assert excel.status_code == 200
-    assert excel.headers["content-type"].startswith("application/vnd.openxmlformats")
-    assert "visitors.xlsx" in excel.headers["content-disposition"]
-    assert excel.content[:2] == b"PK"
+    async def audit_rows():
+        async with TestingSessionLocal() as db:
+            result = await db.execute(
+                __import__("sqlalchemy").select(AuditLog).where(
+                    AuditLog.action == "VISITOR_CREATED"
+                )
+            )
+            return result.scalars().all()
 
-    pdf = client.get("/reports/visitors.pdf", headers=auth_headers(users["admin"]))
-    assert pdf.status_code == 200
-    assert pdf.headers["content-type"] == "application/pdf"
-    assert "visitors.pdf" in pdf.headers["content-disposition"]
-    assert pdf.content.startswith(b"%PDF")
+    assert len(run(audit_rows())) == 1
 
 
-def test_reports_require_admin_role(users):
-    excel = client.get("/reports/visitors.xlsx", headers=auth_headers(users["user"]))
-    pdf = client.get("/reports/visitors.pdf", headers=auth_headers(users["user"]))
-    assert excel.status_code == 403
-    assert pdf.status_code == 403
-
-
-def test_notification_preferences_create_and_update(users):
-    first = client.put(
-        "/notifications/preferences",
-        headers=auth_headers(users["admin"]),
-        json={"muted": True, "internet_requests": False},
+def test_create_visitor_rejects_self_approval(client):
+    organization_id, location_id = run(_seed_org_and_location())
+    user_id = run(
+        _seed_user(email="creator@example.com", organization_id=organization_id)
     )
-    assert first.status_code == 200
-    assert first.json() == {"muted": True, "internet_requests": False}
+    set_authenticated_user(user_id)
 
-    second = client.put(
-        "/notifications/preferences",
-        headers=auth_headers(users["admin"]),
-        json={"muted": False, "internet_requests": True},
+    response = client.post(
+        "/visitors",
+        json={
+            "location_id": location_id,
+            "approver_id": user_id,
+            "visitor_name": "Visitor One",
+            "visitor_phone": "5551234567",
+            "purpose": "Interview",
+            "visit_date": "2030-02-01",
+            "pass_type": "Single Day",
+            "photo_metadata": {},
+            "consent": True,
+        },
     )
-    assert second.status_code == 200
-    assert second.json() == {"muted": False, "internet_requests": True}
 
-    forbidden = client.put(
-        "/notifications/preferences",
-        headers=auth_headers(users["user"]),
-        json={"muted": True},
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Creator cannot approve their own entry"
+
+
+def test_admin_can_approve_pending_visitor(client):
+    organization_id, location_id = run(_seed_org_and_location())
+    creator_id = run(
+        _seed_user(email="creator@example.com", organization_id=organization_id)
     )
-    assert forbidden.status_code == 403
+    admin_id = run(
+        _seed_user(
+            email="admin@example.com",
+            role=UserRole.ADMIN,
+            organization_id=organization_id,
+        )
+    )
+    entry_id = run(_seed_visitor(creator_id, location_id))
+    set_authenticated_user(admin_id)
+
+    response = client.post(
+        f"/visitors/{entry_id}/approval",
+        json={"approved": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == VisitorStatus.APPROVED.value
+    assert response.json()["approver_id"] == admin_id
+
+
+def test_admin_cannot_list_users_from_another_organization(client):
+    org_one, _ = run(_seed_org_and_location())
+    admin_id = run(
+        _seed_user(
+            email="admin@example.com",
+            role=UserRole.ADMIN,
+            organization_id=org_one,
+        )
+    )
+    run(_seed_user(email="same@example.com", organization_id=org_one))
+    other_org_id = run(
+        _seed_user(email="other@example.com", organization_id=999)
+    )
+    set_authenticated_user(admin_id)
+
+    response = client.get("/users")
+
+    assert response.status_code == 200
+    emails = {item["email"] for item in response.json()}
+    assert "same@example.com" in emails
+    assert "other@example.com" not in emails
+    assert other_org_id > 0
+
+
+def test_notification_read_requires_ownership(client):
+    owner_id = run(_seed_user(email="owner@example.com"))
+    other_id = run(_seed_user(email="other@example.com"))
+
+    async def create_notification():
+        async with TestingSessionLocal() as db:
+            item = Notification(
+                recipient_id=owner_id,
+                type=NotificationType.SYSTEM,
+                title="Notice",
+                message="Message",
+            )
+            db.add(item)
+            await db.commit()
+            await db.refresh(item)
+            return item.id
+
+    notification_id = run(create_notification())
+    set_authenticated_user(other_id)
+
+    response = client.patch(f"/notifications/{notification_id}/read")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Notification not found"
+
+
+def test_dashboard_returns_role_scoped_counts(client):
+    organization_id, location_id = run(_seed_org_and_location())
+    user_id = run(
+        _seed_user(email="dashboard@example.com", organization_id=organization_id)
+    )
+    run(_seed_visitor(user_id, location_id, VisitorStatus.APPROVED))
+    run(_seed_visitor(user_id, location_id, VisitorStatus.REJECTED))
+    set_authenticated_user(user_id)
+
+    response = client.get("/dashboard/summary")
+
+    assert response.status_code == 200
+    assert response.json()[VisitorStatus.APPROVED.value] == 1
+    assert response.json()[VisitorStatus.REJECTED.value] == 1

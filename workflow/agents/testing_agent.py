@@ -1103,6 +1103,46 @@ class TestingAgent:
         
         return structure
     
+    def _read_backend_code_content(self, backend_path: Path) -> str:
+        """
+        Read and consolidate all backend code content to provide to LLM.
+        
+        Args:
+            backend_path: Path to backend directory
+            
+        Returns:
+            Consolidated code content with file markers
+        """
+        code_content_parts = []
+        
+        # Priority files to read (in order)
+        priority_files = ["main.py", "models.py", "schemas.py", "database.py", "config.py"]
+        
+        for filename in priority_files:
+            filepath = backend_path / filename
+            if filepath.exists():
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    code_content_parts.append(f"\n{'='*60}\n## FILE: {filename}\n{'='*60}\n{content}")
+                except Exception as e:
+                    print(f"      ⚠️  Error reading {filename}: {str(e)}")
+        
+        # Also read from module directories
+        for module_dir in ["models", "routes", "routers", "services", "crud"]:
+            mod_path = backend_path / module_dir
+            if mod_path.exists() and mod_path.is_dir():
+                for py_file in mod_path.glob("*.py"):
+                    if py_file.name != "__init__.py":
+                        try:
+                            with open(py_file, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                            code_content_parts.append(f"\n{'='*60}\n## FILE: {module_dir}/{py_file.name}\n{'='*60}\n{content}")
+                        except Exception as e:
+                            print(f"      ⚠️  Error reading {module_dir}/{py_file.name}: {str(e)}")
+        
+        return "\n".join(code_content_parts)
+    
     def generate_backend_tests(
         self,
         backend_dir: str
@@ -1126,6 +1166,11 @@ class TestingAgent:
         backend_structure = self._scan_backend_structure(backend_path)
         print(f"      ✅ Found modules: {list(backend_structure['modules'].keys())}")
         
+        # Read ACTUAL backend code content
+        print(f"   📖 Reading backend code content...")
+        backend_code_content = self._read_backend_code_content(backend_path)
+        print(f"      ✅ Read {len(backend_code_content)} characters of backend code")
+        
         generated_tests = {
             "unit_tests": {},
             "integration_tests": {},
@@ -1148,11 +1193,9 @@ class TestingAgent:
         if main_file.exists():
             print(f"   📝 Generating integration tests for main.py...")
             try:
-                with open(main_file, 'r', encoding='utf-8') as f:
-                    code = f.read()
-                
+                # Use the consolidated backend code content instead of just main.py
                 integration_tests = self.generator.generate_backend_integration_tests(
-                    code, "main.py", import_context
+                    backend_code_content, "main.py", import_context
                 )
                 
                 generated_tests["integration_tests"] = integration_tests
@@ -1166,49 +1209,24 @@ class TestingAgent:
             except Exception as e:
                 print(f"      ⚠️  Error: {str(e)}")
         
-        # Find Python files for unit tests
-        python_files = [
-            f for f in backend_path.rglob("*.py")
-            if f.name not in ["__init__.py", "test_*.py"]
-            and "tests" not in f.parts
-            and f.parent.name not in ["migrations", "__pycache__"]
-        ]
-        
-        # Generate unit tests for each file (limit to important files)
-        important_files = [
-            f for f in python_files
-            if f.name in ["main.py", "config.py"] or
-            f.parent.name in ["models", "routes", "services"]
-        ]
-        
-        for py_file in important_files[:5]:  # Limit to 5 files
-            print(f"   📝 Generating unit tests for {py_file.name}...")
-            try:
-                with open(py_file, 'r', encoding='utf-8') as f:
-                    code = f.read()
-                
-                unit_tests = self.generator.generate_backend_unit_tests(
-                    code, py_file.name, import_context
-                )
-                
-                generated_tests["unit_tests"][py_file.name] = unit_tests
-                
-                # Write unit tests
-                test_file = tests_dir / unit_tests.get("test_file", f"test_{py_file.stem}.py")
-                with open(test_file, 'w', encoding='utf-8') as f:
-                    f.write(unit_tests.get("code", ""))
-                print(f"      ✅ Written: {test_file}")
-                
-                # Write fixtures if provided
-                if "fixtures_file" in unit_tests and "fixtures_code" in unit_tests:
-                    fixtures_file = tests_dir / unit_tests["fixtures_file"]
-                    if not fixtures_file.exists():
-                        with open(fixtures_file, 'w', encoding='utf-8') as f:
-                            f.write(unit_tests["fixtures_code"])
-                        print(f"      ✅ Written: {fixtures_file}")
-                
-            except Exception as e:
-                print(f"      ⚠️  Error: {str(e)}")
+        # Generate unit tests using the full backend code content
+        # This ensures tests are code-specific and not generic
+        print(f"   📝 Generating unit tests based on actual backend code...")
+        try:
+            unit_tests = self.generator.generate_backend_unit_tests(
+                backend_code_content, "backend_code", import_context
+            )
+            
+            generated_tests["unit_tests"]["backend"] = unit_tests
+            
+            # Write unit tests
+            test_file = tests_dir / unit_tests.get("test_file", "test_main.py")
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(unit_tests.get("code", ""))
+            print(f"      ✅ Written: {test_file}")
+            
+        except Exception as e:
+            print(f"      ⚠️  Error: {str(e)}")
         
         return generated_tests
     
